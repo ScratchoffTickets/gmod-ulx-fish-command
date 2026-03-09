@@ -43,21 +43,22 @@ local function SpawnAndFlingFish(target)
     end
 end
 
+local function StopFishFlinging(entIndex)
+    timer.Remove("FishFling_" .. entIndex)
+end
+
 local function StartFishFlinging(target, interval)
-    local fishTimer = "FishFling_" .. target:EntIndex()
+    local entIndex = target:EntIndex()
+    local steamID = target:SteamID()
+    local fishTimer = "FishFling_" .. entIndex
     timer.Create(fishTimer, interval, 0, function()
         if not IsValid(target) or target:Health() <= 0 then
             timer.Remove(fishTimer)
-            fishingPlayers[target:SteamID()] = nil
+            fishingPlayers[steamID] = nil
             return
         end
         SpawnAndFlingFish(target)
     end)
-end
-
-local function StopFishFlinging(target)
-    local fishTimer = "FishFling_" .. target:EntIndex()
-    timer.Remove(fishTimer)
 end
 
 local function ShakePlayerCamera(target)
@@ -66,31 +67,33 @@ local function ShakePlayerCamera(target)
 end
 
 local function SetupTimers(target, multiplier)
-    multiplier = multiplier / 2
-    local finalEventTimer = "FinalEvent_" .. target:EntIndex()
+    local entIndex = target:EntIndex()
+    local steamID = target:SteamID()
+    local finalEventTimer = "FinalEvent_" .. entIndex
+    local rampUpTimer = "RampUpFishFlinging_" .. entIndex
 
     local initialInterval = 0.2 / multiplier
     local rampUpRate = 0.005
     local eventDuration = 30
 
-    timer.Create("RampUpFishFlinging", 1, 0, function()
+    timer.Create(rampUpTimer, 1, 0, function()
         if not IsValid(target) or target:Health() <= 0 then
-            timer.Remove("RampUpFishFlinging")
-            StopFishFlinging(target)
+            timer.Remove(rampUpTimer)
+            StopFishFlinging(entIndex)
             return
         end
 
         initialInterval = initialInterval - rampUpRate
         if initialInterval < 0.05 then initialInterval = 0.05 end
 
-        StopFishFlinging(target)
+        StopFishFlinging(entIndex)
         StartFishFlinging(target, initialInterval)
     end)
 
     timer.Create(finalEventTimer, eventDuration, 1, function()
         if IsValid(target) and target:Health() > 0 then
-            timer.Remove("RampUpFishFlinging")
-            StopFishFlinging(target)
+            timer.Remove(rampUpTimer)
+            StopFishFlinging(entIndex)
             target:EmitSound("ambient/atmosphere/terrain_rumble1.wav")
             ShakePlayerCamera(target)
 
@@ -112,12 +115,12 @@ local function SetupTimers(target, multiplier)
                     Jeoff:EmitSound("physics/metal/metal_large_debris1.wav", 100, 100)
                     target:Kill()
 
-                    hook.Add("PlayerSpawn", "RemoveBigFish_" .. target:EntIndex(), function(ply)
+                    hook.Add("PlayerSpawn", "RemoveBigFish_" .. entIndex, function(ply)
                         if ply == target then
                             if IsValid(Jeoff) then
                                 Jeoff:Remove()
                             end
-                            hook.Remove("PlayerSpawn", "RemoveBigFish_" .. target:EntIndex())
+                            hook.Remove("PlayerSpawn", "RemoveBigFish_" .. entIndex)
                         end
                     end)
                 end
@@ -125,25 +128,26 @@ local function SetupTimers(target, multiplier)
         end
     end)
 
-    hook.Add("PlayerDeath", "ResetFishFling_" .. target:EntIndex(), function(ply)
+    hook.Add("PlayerDeath", "ResetFishFling_" .. entIndex, function(ply)
         if ply == target then
-            StopFishFlinging(target)
-            timer.Remove("RampUpFishFlinging")
+            StopFishFlinging(entIndex)
+            timer.Remove(rampUpTimer)
             timer.Remove(finalEventTimer)
-            fishingPlayers[target:SteamID()] = nil
-            hook.Remove("PlayerDeath", "ResetFishFling_" .. target:EntIndex())
-            hook.Remove("PlayerSpawn", "RemoveBigFish_" .. target:EntIndex())
+            fishingPlayers[steamID] = nil
+            hook.Remove("PlayerDeath", "ResetFishFling_" .. entIndex)
+            hook.Remove("PlayerSpawn", "RemoveBigFish_" .. entIndex)
         end
     end)
 end
 
 local function DousePlayerWithFish(target, multiplier)
     multiplier = multiplier / 2
+    local steamID = target:SteamID()
     target:EmitSound("events/you_know_what_that_means.ogg")
 
     timer.Simple(1.3, function()
         if not IsValid(target) or target:Health() <= 0 then
-            fishingPlayers[target:SteamID()] = nil
+            fishingPlayers[steamID] = nil
             return
         end
         StartFishFlinging(target, 0.2 / multiplier)
@@ -168,9 +172,31 @@ local function EnableNoclip(target)
     noNoclipPlayers[target:SteamID()] = nil
 end
 
+local function CleanupFishing(target)
+    local entIndex = target:EntIndex()
+    local steamID = target:SteamID()
+
+    StopFishFlinging(entIndex)
+    timer.Remove("RampUpFishFlinging_" .. entIndex)
+    timer.Remove("FinalEvent_" .. entIndex)
+
+    hook.Remove("PlayerDeath", "ResetFishFling_" .. entIndex)
+    hook.Remove("PlayerDeath", "UnlockMovementOnDeath_" .. entIndex)
+    hook.Remove("PlayerSpawn", "RemoveBigFish_" .. entIndex)
+
+    fishingPlayers[steamID] = nil
+    noNoclipPlayers[steamID] = nil
+end
+
 hook.Add("PlayerNoClip", "DisableNoclipForPlayers", function(ply)
     if noNoclipPlayers[ply:SteamID()] then
         return false
+    end
+end)
+
+hook.Add("PlayerDisconnected", "CleanupFishingOnDisconnect", function(ply)
+    if fishingPlayers[ply:SteamID()] then
+        CleanupFishing(ply)
     end
 end)
 
@@ -191,15 +217,16 @@ function ulx.fish(calling_ply, target_ply, amount, disable_noclip, lock_movement
     ulx.fancyLogAdmin(calling_ply, "#A fished #T!", target_ply, amount)
     DousePlayerWithFish(target_ply, amount)
 
-    if disable_noclip then
-        DisableNoclip(target_ply)
-    end
-
     if lock_movement then
         LockPlayerMovement(target_ply, true)
     end
 
-    hook.Add("PlayerDeath", "UnlockMovementOnDeath_" .. target_ply:EntIndex(), function(ply)
+    if disable_noclip then
+        DisableNoclip(target_ply)
+    end
+
+    local entIndex = target_ply:EntIndex()
+    hook.Add("PlayerDeath", "UnlockMovementOnDeath_" .. entIndex, function(ply)
         if ply == target_ply then
             if lock_movement then
                 LockPlayerMovement(target_ply, false)
@@ -207,8 +234,7 @@ function ulx.fish(calling_ply, target_ply, amount, disable_noclip, lock_movement
             if disable_noclip then
                 EnableNoclip(target_ply)
             end
-            fishingPlayers[target_ply:SteamID()] = nil
-            hook.Remove("PlayerDeath", "UnlockMovementOnDeath_" .. target_ply:EntIndex())
+            hook.Remove("PlayerDeath", "UnlockMovementOnDeath_" .. entIndex)
         end
     end)
 end
